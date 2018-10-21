@@ -2,42 +2,19 @@ class MonzoController < ApplicationController
   def receive
     webhook = JSON.parse(request.body.read, symbolize_names: true)
 
-    return render json: { error: :unsupported_type } unless webhook[:type] == 'transaction.created'
-    return render json: { error: :zero_value } if webhook[:data][:amount] == 0
-    return render json: { error: :declined } if webhook[:data][:decline_reason].present?
+    ynab_account_id = params[:ynab_account_id] || ENV['YNAB_MONZO_ACCOUNT_ID'] || ENV['YNAB_ACCOUNT_ID']
+    ynab_client = ::F2ynab::YNAB::Client.new(ENV['YNAB_ACCESS_TOKEN'], ENV['YNAB_BUDGET_ID'], ynab_account_id)
 
-    payee_name = webhook[:data][:merchant].try(:[], :name)
-    payee_name ||= webhook[:data][:counterparty][:name] if webhook[:data][:counterparty].present?
-    payee_name ||= 'Topup' if webhook[:data][:metadata][:is_topup]
-    payee_name ||= webhook[:data][:description]
+    import = ::F2ynab::Webhooks::Monzo.new(ynab_client, webhook,
+      skip_emoji: ENV['SKIP_EMOJI'].present?,
+      skip_tags: ENV['SKIP_TAGS'].present?,
+      skip_foreign_currency_flag: ENV['SKIP_FOREIGN_CURRENCY_FLAG'].present?,
+    ).import
 
-    description = ''
-    flag = nil
-
-    foreign_transaction = webhook[:data][:local_currency] != webhook[:data][:currency]
-    if foreign_transaction
-      money = Money.new(webhook[:data][:local_amount].abs, webhook[:data][:local_currency])
-      description.prepend("(#{money.format}) ")
-      flag = 'orange'
-    end
-
-    description.prepend("#{webhook[:data][:merchant][:emoji]} ") if webhook[:data][:merchant].try(:[], :emoji)
-    description << webhook[:data][:merchant][:metadata][:suggested_tags] if webhook[:data][:merchant].try(:[], :metadata).try(:[], :suggested_tags)
-
-    ynab_creator = YNAB::TransactionCreator.new(
-      date: Time.parse(webhook[:data][:created]).to_date,
-      amount: webhook[:data][:amount] * 10,
-      payee_name: payee_name,
-      description: description.strip,
-      cleared: !foreign_transaction,
-      flag: flag
-    )
-
-    create = ynab_creator.create
-    if create.try(:id).present?
-      render json: create
+    if import.try(:id) || import.try(:[], :warning)
+      render json: import
     else
-      render json: create, status: 400
+      render json: import, status: 400
     end
   end
 end
